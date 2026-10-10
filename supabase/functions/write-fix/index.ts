@@ -1,15 +1,4 @@
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
-
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
+import { checkUsage, overLimitResponse, failClosedResponse, json, corsHeaders } from "../_shared/usage.ts";
 
 const MOCK_FIXES: Record<string, { why_it_matters: string; fix_steps: string[]; patch: string; verify_steps: string[] }> = {
   default: {
@@ -86,6 +75,12 @@ function detectStackHints(packageJson?: string): string[] {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
+
+  const usage = await checkUsage("write-fix");
+  if (!usage.ok) {
+    if (usage.over) return overLimitResponse();
+    return failClosedResponse(usage.error);
+  }
 
   try {
     const { finding, package_json, mock } = await req.json();

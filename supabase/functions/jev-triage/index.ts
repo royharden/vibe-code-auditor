@@ -1,20 +1,9 @@
 import { triage } from "../_shared/policy.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+import { checkUsage, overLimitResponse, failClosedResponse, json, corsHeaders } from "../_shared/usage.ts";
 
 const JEV_MODEL = "jev-1.13.0";
 const JEV_PRICE_PER_MILLION_INPUT = 0.042;
-
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
+const JEV_API_URL = "https://api.typesafe.ai/v1/systemone";
 
 const INJECTION_PATTERNS = /ignore (all |any )?previous|disregard (all |any )?instructions|system prompt|you are now|new instructions:/i;
 
@@ -83,7 +72,7 @@ async function callJev(state: unknown, apiKey: string): Promise<{ data: any; lat
       await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
     }
     try {
-      const res = await fetch("https://api.typesafe.ai/v1/systemone", {
+      const res = await fetch(JEV_API_URL, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -131,6 +120,12 @@ function parseAnswers(data: any) {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
+
+  const usage = await checkUsage("jev-triage");
+  if (!usage.ok) {
+    if (usage.over) return overLimitResponse();
+    return failClosedResponse(usage.error);
+  }
 
   try {
     const { findings, mode } = await req.json();

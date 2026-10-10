@@ -478,8 +478,11 @@ export async function runScan(opts: ScanOptions & { demoFixtureId?: string }): P
 }
 
 export async function ignoreFinding(findingId: string, ignored: boolean): Promise<void> {
-  const { error } = await supabase.from("findings").update({ status: ignored ? "ignored" : "open" }).eq("id", findingId);
-  if (error) throw new Error(error.message);
+  const { data, error } = await supabase.functions.invoke("update-finding", {
+    body: { finding_id: findingId, status: ignored ? "ignored" : "open" },
+  });
+  if (error) throw new Error(error.message || "Could not update finding");
+  if (data?.error) throw new Error(data.error);
 }
 
 export async function loadReport(slug: string): Promise<{ scan: ScanRowOf; findings: FindingRow[] } | null> {

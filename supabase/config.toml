@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.write-fix]
 verify_jwt = false
+
+[functions.update-finding]
+verify_jwt = false
