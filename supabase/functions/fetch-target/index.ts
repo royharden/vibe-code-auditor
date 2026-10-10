@@ -57,3 +57,5 @@ Deno.serve(async (req: Request) => {
     return json({ error: (err as Error).message || "Fetch failed" }, 500);
   }
 });
+
+// verify_jwt=true

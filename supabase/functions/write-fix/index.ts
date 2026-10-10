@@ -130,3 +130,5 @@ Return ONLY JSON with keys: why_it_matters (string), fix_steps (string[]), patch
     return json({ error: (err as Error).message || "Write-fix failed" }, 500);
   }
 });
+
+// verify_jwt=true

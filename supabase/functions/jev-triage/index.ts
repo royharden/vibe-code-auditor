@@ -187,3 +187,5 @@ Deno.serve(async (req: Request) => {
     return json({ error: (err as Error).message || "Triage failed" }, 500);
   }
 });
+
+// verify_jwt=true

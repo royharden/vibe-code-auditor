@@ -1,16 +1,16 @@
 project_id = "vibe-code-auditor"
 
 [functions.fetch-target]
-verify_jwt = false
+verify_jwt = true
 
 [functions.audit]
-verify_jwt = false
+verify_jwt = true
 
 [functions.jev-triage]
-verify_jwt = false
+verify_jwt = true
 
 [functions.write-fix]
-verify_jwt = false
+verify_jwt = true
 
 [functions.update-finding]
-verify_jwt = false
+verify_jwt = true

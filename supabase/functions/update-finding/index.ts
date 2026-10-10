@@ -37,3 +37,5 @@ Deno.serve(async (req: Request) => {
     return json({ error: (err as Error).message || "Update failed" }, 500);
   }
 });
+
+// verify_jwt=true
