@@ -2,6 +2,10 @@ import { validateTarget, fetchTarget } from "../_shared/fetch-target.ts";
 import { fetchRepo } from "../_shared/fetch-repo.ts";
 import { isSensitiveText } from "../_shared/mask.ts";
 import { checkUsage, overLimitResponse, failClosedResponse, json, corsHeaders } from "../_shared/usage.ts";
+import { readJsonBody } from "../_shared/request.ts";
+
+const MAX_BODY_BYTES = 16 * 1024;
+const MAX_TARGET_CHARS = 2048;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
@@ -13,20 +17,25 @@ Deno.serve(async (req: Request) => {
     return failClosedResponse(usage.error);
   }
 
+  const parsed = await readJsonBody(req, MAX_BODY_BYTES);
+  if (!parsed.ok) return parsed.response;
+
   try {
-    const body = await req.json();
-    const mode = body.mode as "url" | "repo";
-    const target = (body.target || "").trim();
+    const body = parsed.data;
+    // Anything that is not "repo" is treated as a URL scan, so the consent and SSRF checks always apply.
+    const mode: "url" | "repo" = body.mode === "repo" ? "repo" : "url";
+    const target = typeof body.target === "string" ? body.target.trim() : "";
     const consent = body.consent === true;
 
     if (!target) return json({ error: "Missing target" }, 400);
+    if (target.length > MAX_TARGET_CHARS) return json({ error: "Target too long" }, 400);
     if (mode === "url" && !consent) {
       return json({ error: "Consent required: confirm you own this app or have permission to audit it." }, 403);
     }
 
     if (mode === "url") {
       try {
-        validateTarget(target);
+        await validateTarget(target);
       } catch (e) {
         return json({ error: (e as Error).message }, 400);
       }

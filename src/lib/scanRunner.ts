@@ -49,7 +49,7 @@ export const SAFETY_RULES = [
   "Never submits forms, logs in, guesses paths, or sends payloads",
   "Found secrets are masked (first 4 + last 4 chars) and hashed, never stored in full",
   "Blocks localhost, private IP ranges, cloud metadata IPs, and non-standard ports",
-  "Redirects are followed manually (max 5) and re-checked at every hop",
+  "Redirects are followed manually (max 3) and re-checked at every hop",
 ];
 
 function slugify(target: string): string {
@@ -120,6 +120,36 @@ interface TriageResponse {
   jev_cost_usd?: number;
 }
 
+// jev-triage accepts at most 50 findings per request; larger scans are sent in batches.
+const TRIAGE_BATCH_SIZE = 50;
+
+async function invokeTriage(findings: AuditFinding[], mode: string): Promise<TriageResponse> {
+  const payload = findings.map((f) => ({
+    auditor: f.auditor,
+    rule_id: f.rule_id,
+    title: f.title,
+    location: f.location,
+    evidence_masked: f.evidence,
+    in_client_bundle: f.in_client_bundle === true,
+  }));
+  if (payload.length <= TRIAGE_BATCH_SIZE) return invoke<TriageResponse>("jev-triage", { findings: payload, mode });
+  const merged: TriageResponse = { results: [], mode: "live", jev_cost_usd: 0 };
+  for (let i = 0; i < payload.length; i += TRIAGE_BATCH_SIZE) {
+    const batch = await invoke<TriageResponse>("jev-triage", { findings: payload.slice(i, i + TRIAGE_BATCH_SIZE), mode });
+    merged.results.push(...batch.results);
+    merged.jev_cost_usd = (merged.jev_cost_usd ?? 0) + (batch.jev_cost_usd ?? 0);
+    if (batch.mode !== "live") merged.mode = batch.mode;
+  }
+  return merged;
+}
+
+// write-fix rejects package_json over 200 KB; without it the fixer just loses its stack hints.
+const MAX_PACKAGE_JSON_CHARS = 200 * 1024;
+
+function boundedPackageJson(text: string | undefined): string | undefined {
+  return text && text.length <= MAX_PACKAGE_JSON_CHARS ? text : undefined;
+}
+
 interface FixResponse {
   fix?: { why_it_matters: string; fix_steps: string[]; patch: string; verify_steps: string[] };
   mode?: string;
@@ -155,17 +185,7 @@ async function runLiveScan(opts: ScanOptions): Promise<ScanOutcome> {
   const auditRes = await invoke<AuditResponse>("audit", { mode: fetchRes.mode, files: fetchRes.files });
   opts.onPhase("auditing", `${auditRes.findings.length} findings from 6 auditors`);
 
-  const triageRes = await invoke<TriageResponse>("jev-triage", {
-    findings: auditRes.findings.map((f) => ({
-      auditor: f.auditor,
-      rule_id: f.rule_id,
-      title: f.title,
-      location: f.location,
-      evidence_masked: f.evidence,
-      in_client_bundle: f.in_client_bundle === true,
-    })),
-    mode: fetchRes.mode,
-  });
+  const triageRes = await invokeTriage(auditRes.findings, fetchRes.mode);
   opts.onPhase("triaging", triageRes.mode === "live" ? "Jev triaged every finding" : "Jev unreachable — fallback table used");
 
   const triageByRule = new Map<string, AuditResponse["findings"][number]>();
@@ -213,7 +233,7 @@ async function runLiveScan(opts: ScanOptions): Promise<ScanOutcome> {
   const top = fixCandidates.slice(0, 8);
   opts.onPhase("fixing", `${top.length} finding(s) routed to the fixer (top 8 by priority)`);
 
-  const packageJson = fetchRes.files.find((f) => f.kind === "package")?.text;
+  const packageJson = boundedPackageJson(fetchRes.files.find((f) => f.kind === "package")?.text);
   await Promise.all(
     top.map(async (c) => {
       try {
@@ -316,17 +336,7 @@ async function runDemoScan(opts: ScanOptions, fixtureId: string): Promise<ScanOu
     opts.onPhase("triaging", "Recorded Jev responses replayed (offline)");
   } else {
     try {
-      triageRes = await invoke<TriageResponse>("jev-triage", {
-        findings: auditRes.findings.map((f) => ({
-          auditor: f.auditor,
-          rule_id: f.rule_id,
-          title: f.title,
-          location: f.location,
-          evidence_masked: f.evidence,
-          in_client_bundle: f.in_client_bundle === true,
-        })),
-        mode: fixture.mode,
-      });
+      triageRes = await invokeTriage(auditRes.findings, fixture.mode);
       jevMode = triageRes.mode === "live" ? "live" : "fallback";
       opts.onPhase("triaging", jevMode === "live" ? "Jev triaged every finding" : "Jev unreachable — fallback table used");
     } catch {
@@ -374,7 +384,7 @@ async function runDemoScan(opts: ScanOptions, fixtureId: string): Promise<ScanOu
   const top = fixCandidates.slice(0, 8);
   opts.onPhase("fixing", `${top.length} finding(s) routed to the fixer (top 8 by priority)`);
 
-  const packageJson = files.find((f) => f.kind === "package")?.text;
+  const packageJson = boundedPackageJson(files.find((f) => f.kind === "package")?.text);
   await Promise.all(
     top.map(async (c) => {
       try {

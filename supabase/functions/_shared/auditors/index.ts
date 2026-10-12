@@ -6,7 +6,9 @@ import { auditA11y } from "./a11y.ts";
 import { auditSeo } from "./seo.ts";
 import { auditPerformance } from "./performance.ts";
 
-export type { Finding } from "./secrets.ts";
+import type { Finding } from "./secrets.ts";
+
+export type { Finding };
 
 export function runAuditors(files: FetchedFile[], mode: string): Finding[] {
   const findings: Finding[] = [];

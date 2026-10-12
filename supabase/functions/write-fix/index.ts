@@ -1,4 +1,8 @@
 import { checkUsage, overLimitResponse, failClosedResponse, json, corsHeaders } from "../_shared/usage.ts";
+import { readJsonBody, isRecord, clip } from "../_shared/request.ts";
+
+const MAX_BODY_BYTES = 512 * 1024;
+const MAX_PACKAGE_JSON_CHARS = 200 * 1024;
 
 const MOCK_FIXES: Record<string, { why_it_matters: string; fix_steps: string[]; patch: string; verify_steps: string[] }> = {
   default: {
@@ -52,8 +56,8 @@ const MOCK_FIXES: Record<string, { why_it_matters: string; fix_steps: string[]; 
   },
 };
 
-function mockFix(ruleId: string) {
-  return MOCK_FIXES[ruleId] || MOCK_FIXES.default;
+function mockFix(ruleId: string | undefined) {
+  return (ruleId !== undefined && Object.hasOwn(MOCK_FIXES, ruleId) ? MOCK_FIXES[ruleId] : undefined) || MOCK_FIXES.default;
 }
 
 function detectStackHints(packageJson?: string): string[] {
@@ -82,9 +86,23 @@ Deno.serve(async (req: Request) => {
     return failClosedResponse(usage.error);
   }
 
+  const body = await readJsonBody(req, MAX_BODY_BYTES);
+  if (!body.ok) return body.response;
+
   try {
-    const { finding, package_json, mock } = await req.json();
-    if (!finding) return json({ error: "finding required" }, 400);
+    const { finding: rawFinding, package_json, mock } = body.data;
+    if (!isRecord(rawFinding)) return json({ error: "finding required" }, 400);
+    if (package_json != null && typeof package_json !== "string") return json({ error: "package_json must be a string" }, 400);
+    if (typeof package_json === "string" && package_json.length > MAX_PACKAGE_JSON_CHARS) {
+      return json({ error: "package_json too large (max 200 KB)" }, 400);
+    }
+    // Only these fields (each truncated) ever reach the prompt; other keys are ignored.
+    const finding = {
+      rule_id: clip(rawFinding.rule_id, 100),
+      title: clip(rawFinding.title, 300),
+      location: clip(rawFinding.location, 500),
+      evidence: clip(rawFinding.evidence, 1000),
+    };
 
     const apiKey = Deno.env.get("OPENAI_API_KEY");
     const baseUrl = Deno.env.get("OPENAI_BASE_URL") || "https://api.openai.com/v1";
@@ -94,8 +112,8 @@ Deno.serve(async (req: Request) => {
       return json({ fix: mockFix(finding.rule_id), mode: "mock" });
     }
 
-    const stackHints = detectStackHints(package_json);
-    const leaked = ["openai_key", "anthropic_key", "aws_key", "stripe_live_key", "github_token", "google_api_key", "slack_token", "private_key", "service_role_jwt", "high_entropy_secret", "committed_env_file"].includes(finding.rule_id);
+    const stackHints = detectStackHints(package_json ?? undefined);
+    const leaked = finding.rule_id !== undefined && ["openai_key", "anthropic_key", "aws_key", "stripe_live_key", "github_token", "google_api_key", "slack_token", "private_key", "service_role_jwt", "high_entropy_secret", "committed_env_file"].includes(finding.rule_id);
 
     const prompt = `You are a security engineer writing a fix for one audit finding.
 Stack: ${stackHints.join(", ") || "unknown web app"}.
@@ -116,7 +134,11 @@ Return ONLY JSON with keys: why_it_matters (string), fix_steps (string[]), patch
         response_format: { type: "json_object" },
       }),
     });
-    if (!res.ok) throw new Error(`LLM error ${res.status}`);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.error(`write-fix: LLM error ${res.status}: ${detail.slice(0, 500)}`);
+      throw new Error(`LLM error ${res.status}`);
+    }
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content || "{}";
     let fix;
@@ -127,7 +149,8 @@ Return ONLY JSON with keys: why_it_matters (string), fix_steps (string[]), patch
     }
     return json({ fix, mode: "llm", model: data.model || model });
   } catch (err) {
-    return json({ error: (err as Error).message || "Write-fix failed" }, 500);
+    console.error(`write-fix: ${(err as Error).message}`);
+    return json({ error: "Write-fix failed" }, 500);
   }
 });
 

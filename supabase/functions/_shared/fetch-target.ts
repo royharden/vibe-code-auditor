@@ -17,33 +17,130 @@ export interface FetchResult {
   durationMs: number;
 }
 
+export const MAX_TOTAL_TEXT_CHARS = 6 * 1024 * 1024;
+
 const BUDGET = {
   maxRequests: 30,
   maxFileBytes: 2 * 1024 * 1024,
-  maxTotalBytes: 6 * 1024 * 1024,
+  maxTotalBytes: MAX_TOTAL_TEXT_CHARS,
   maxCdnFiles: 10,
-  maxRedirects: 5,
+  maxRedirects: 3,
   timeoutMs: 20_000,
+  dnsTimeoutMs: 5_000,
 };
 
-const BLOCKED_HOST_PATTERNS = [
+const BLOCKED_HOST_MESSAGE = "This host is not reachable by the scanner (private or restricted)";
+
+const BLOCKED_HOSTNAME_PATTERNS = [
   /^localhost$/i,
-  /^127\./,
-  /^10\./,
-  /^192\.168\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-  /^169\.254\./,
-  /^0\./,
-  /^::1$/,
-  /^\[::1\]$/,
-  /^fe80:/i,
-  /^fc00:/i,
-  /^fd[0-9a-f]{2}:/i,
+  /\.localhost$/i,
   /\.internal$/i,
   /\.local$/i,
 ];
 
-export function validateTarget(raw: string): URL {
+function parseIPv4(s: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return null;
+  const octets = m.slice(1).map(Number);
+  return octets.every((n) => n <= 255) ? octets : null;
+}
+
+// Parses a (bracket-less) IPv6 literal into 8 16-bit groups, including an embedded IPv4 tail.
+function parseIPv6(input: string): number[] | null {
+  let s = input.toLowerCase();
+  if (!s.includes(":") || !/^[0-9a-f:.]+$/.test(s)) return null;
+  let tail: number[] = [];
+  if (s.includes(".")) {
+    const cut = s.lastIndexOf(":");
+    const v4 = parseIPv4(s.slice(cut + 1));
+    if (!v4) return null;
+    tail = [(v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]];
+    s = s.slice(0, cut + 1);
+    if (!s.endsWith("::")) s = s.slice(0, -1);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    for (const g of part.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      out.push(parseInt(g, 16));
+    }
+    return out;
+  };
+  const head = groups(halves[0]);
+  const rest = halves.length === 2 ? groups(halves[1]) : [];
+  if (!head || !rest) return null;
+  const explicit = head.length + rest.length + tail.length;
+  if (halves.length === 2) {
+    if (explicit > 7) return null;
+    return [...head, ...new Array(8 - explicit).fill(0), ...rest, ...tail];
+  }
+  return explicit === 8 ? [...head, ...tail] : null;
+}
+
+function isBlockedIPv4([a, b, c]: number[]): boolean {
+  return (
+    a === 0 || // 0.0.0.0/8 "this network"
+    a === 10 || // 10.0.0.0/8 private
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT
+    a === 127 || // 127.0.0.0/8 loopback
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local, incl. cloud metadata
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
+    (a === 192 && b === 0 && c === 0) || // 192.0.0.0/24 IETF protocol assignments
+    (a === 192 && b === 0 && c === 2) || // 192.0.2.0/24 documentation
+    (a === 192 && b === 88 && c === 99) || // 192.88.99.0/24 6to4 relay
+    (a === 192 && b === 168) || // 192.168.0.0/16 private
+    (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15 benchmarking
+    (a === 198 && b === 51 && c === 100) || // 198.51.100.0/24 documentation
+    (a === 203 && b === 0 && c === 113) || // 203.0.113.0/24 documentation
+    a >= 224 // 224.0.0.0/4 multicast, 240.0.0.0/4 reserved, broadcast
+  );
+}
+
+function isBlockedIPv6(g: number[]): boolean {
+  const zeroPrefix = g.slice(0, 5).every((x) => x === 0);
+  if (zeroPrefix && g[5] === 0xffff) return true; // ::ffff:0:0/96 IPv4-mapped
+  if (zeroPrefix && g[5] === 0) return true; // ::/96: ::, ::1, IPv4-compatible
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((g[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  if ((g[0] & 0xe000) !== 0x2000) return true; // outside 2000::/3 global unicast (64:ff9b::/96, 100::/64, fec0::/10, ...)
+  if (g[0] === 0x2001 && g[1] < 0x0200) return true; // 2001::/23 IETF protocol assignments (Teredo, ...)
+  if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // 2001:db8::/32 documentation
+  if (g[0] === 0x2002) return true; // 2002::/16 6to4 (embeds IPv4)
+  if (g[0] === 0x3fff && g[1] < 0x1000) return true; // 3fff::/20 documentation
+  return false;
+}
+
+// Returns true/false for IP literals, or null when `addr` is not an IP address.
+function isBlockedAddress(addr: string): boolean | null {
+  const v4 = parseIPv4(addr);
+  if (v4) return isBlockedIPv4(v4);
+  const v6 = parseIPv6(addr);
+  if (v6) return isBlockedIPv6(v6);
+  return null;
+}
+
+// A and AAAA, fail closed: any resolver error other than "no records" rejects, and so does
+// a name with no addresses at all.
+async function resolveAddresses(host: string): Promise<string[]> {
+  const lookups = await Promise.allSettled([
+    Deno.resolveDns(host, "A", { signal: AbortSignal.timeout(BUDGET.dnsTimeoutMs) }),
+    Deno.resolveDns(host, "AAAA", { signal: AbortSignal.timeout(BUDGET.dnsTimeoutMs) }),
+  ]);
+  const addrs: string[] = [];
+  for (const r of lookups) {
+    if (r.status === "fulfilled") addrs.push(...r.value);
+    else if (!(r.reason instanceof Deno.errors.NotFound)) throw new Error("DNS lookup failed for this host");
+  }
+  if (addrs.length === 0) throw new Error("Could not resolve this host");
+  return addrs;
+}
+
+// Syntax-only checks; validateTarget adds the host and DNS checks.
+function parseHttpUrl(raw: string): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -56,29 +153,50 @@ export function validateTarget(raw: string): URL {
   if (url.port && url.port !== "80" && url.port !== "443") {
     throw new Error("Non-standard ports are not allowed");
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  for (const p of BLOCKED_HOST_PATTERNS) {
-    if (p.test(host)) {
-      throw new Error("This host is not reachable by the scanner (private or restricted)");
-    }
+  return url;
+}
+
+export async function validateTarget(raw: string): Promise<URL> {
+  const url = parseHttpUrl(raw);
+  const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
+  if (!host) throw new Error("Invalid URL");
+
+  const literal = isBlockedAddress(host);
+  if (literal !== null) {
+    if (literal) throw new Error(BLOCKED_HOST_MESSAGE);
+    return url;
   }
-  if (host === "169.254.169.254") {
-    throw new Error("This host is not reachable by the scanner");
+
+  // Single-label names ("metadata", "intranet") and reserved suffixes are never public sites.
+  if (!host.includes(".") || BLOCKED_HOSTNAME_PATTERNS.some((p) => p.test(host))) {
+    throw new Error(BLOCKED_HOST_MESSAGE);
+  }
+
+  // Blocks names that resolve to private space (e.g. 127.0.0.1.nip.io).
+  for (const addr of await resolveAddresses(host)) {
+    if (isBlockedAddress(addr) !== false) throw new Error(BLOCKED_HOST_MESSAGE);
   }
   return url;
+}
+
+interface Fetched {
+  res: Response;
+  finalUrl: URL;
+  // Clears the per-request timeout; call once the body has been read.
+  done: () => void;
 }
 
 async function fetchWithLimits(
   url: URL,
   requestsUsed: { n: number },
   bytesTotal: { n: number }
-): Promise<{ res: Response; finalUrl: URL } | { error: string }> {
+): Promise<Fetched | { error: string }> {
   let current = url;
   for (let hop = 0; hop <= BUDGET.maxRedirects; hop++) {
     if (requestsUsed.n >= BUDGET.maxRequests) return { error: "Request budget (30) exhausted" };
     let checked: URL;
     try {
-      checked = validateTarget(current.toString());
+      checked = await validateTarget(current.toString());
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -97,8 +215,9 @@ async function fetchWithLimits(
       clearTimeout(timer);
       return { error: `Fetch failed: ${(e as Error).message}` };
     }
-    clearTimeout(timer);
     if (res.status >= 300 && res.status < 400) {
+      clearTimeout(timer);
+      res.body?.cancel().catch(() => {});
       const loc = res.headers.get("location");
       if (!loc) return { error: `Redirect ${res.status} without location` };
       try {
@@ -108,14 +227,24 @@ async function fetchWithLimits(
       }
       continue;
     }
-    return { res, finalUrl: checked };
+    // The timeout stays armed until the caller has read the body (readBody calls done()).
+    return { res, finalUrl: checked, done: () => clearTimeout(timer) };
   }
-  return { error: "Too many redirects (max 5)" };
+  return { error: `Too many redirects (max ${BUDGET.maxRedirects})` };
 }
 
-async function readBody(res: Response, bytesTotal: { n: number }): Promise<{ text?: string; size: number; error?: string }> {
+async function readBody(fetched: Fetched, bytesTotal: { n: number }): Promise<{ text?: string; size: number; error?: string }> {
+  try {
+    return await readBodyWithin(fetched.res, bytesTotal);
+  } finally {
+    fetched.done();
+  }
+}
+
+async function readBodyWithin(res: Response, bytesTotal: { n: number }): Promise<{ text?: string; size: number; error?: string }> {
   const lenHeader = parseInt(res.headers.get("content-length") || "", 10);
   if (!isNaN(lenHeader) && lenHeader > BUDGET.maxFileBytes) {
+    res.body?.cancel().catch(() => {});
     return { size: lenHeader, error: "File exceeds 2 MB limit" };
   }
   let buf = new Uint8Array(0);
@@ -215,7 +344,7 @@ export async function fetchTarget(rawUrl: string): Promise<FetchResult> {
   const bytesTotal = { n: 0 };
   const files: FetchedFile[] = [];
 
-  const page = await fetchWithLimits(validateTarget(rawUrl), requestsUsed, bytesTotal);
+  const page = await fetchWithLimits(parseHttpUrl(rawUrl), requestsUsed, bytesTotal);
   if ("error" in page) {
     return {
       mode: "url",
@@ -227,7 +356,7 @@ export async function fetchTarget(rawUrl: string): Promise<FetchResult> {
   }
 
   const { res, finalUrl } = page;
-  const body = await readBody(res, bytesTotal);
+  const body = await readBody(page, bytesTotal);
   const headers = headersToObject(res);
   const html = body.text || "";
   const file: FetchedFile = {
@@ -253,7 +382,7 @@ export async function fetchTarget(rawUrl: string): Promise<FetchResult> {
       files.push({ path: assetUrl, kind: "asset", status: 0, size: 0, headers: {}, error: r.error });
       continue;
     }
-    const b = await readBody(r.res, bytesTotal);
+    const b = await readBody(r, bytesTotal);
     const f: FetchedFile = {
       path: assetUrl,
       kind: sameOrigin ? "asset" : "cdn",
@@ -269,7 +398,7 @@ export async function fetchTarget(rawUrl: string): Promise<FetchResult> {
       if (sm) {
         const sr = await fetchWithLimits(new URL(sm), requestsUsed, bytesTotal);
         if (!("error" in sr)) {
-          const sb = await readBody(sr.res, bytesTotal);
+          const sb = await readBody(sr, bytesTotal);
           files.push({
             path: sm,
             kind: "sourcemap",
@@ -293,7 +422,7 @@ export async function fetchTarget(rawUrl: string): Promise<FetchResult> {
       files.push({ path: u.toString(), kind: "wellknown", status: 0, size: 0, headers: {}, error: r.error });
       continue;
     }
-    const b = await readBody(r.res, bytesTotal);
+    const b = await readBody(r, bytesTotal);
     files.push({
       path: u.toString(),
       kind: "wellknown",

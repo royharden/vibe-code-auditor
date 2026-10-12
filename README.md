@@ -36,11 +36,17 @@ The scanner is **read-only and passive**. Hard rules, enforced server-side in `f
   code and config only. JWTs are decoded locally (base64 only) to read the `role` claim.
 - **Secrets are masked everywhere**: `sk-p…9xQ2` (first 4 + last 4 chars). Only the mask
   and a hash are stored — never the full value. LLM and Jev inputs see only masked evidence.
-- **Limits & SSRF guard**: http/https only; blocks localhost, private/link-local/CGNAT
-  ranges, `169.254.169.254`, `.internal`/`.local` hosts, and non-standard ports. Redirects
-  are followed manually (max 5) and re-checked at every hop. Each scan: max 30 requests,
-  2 MB per file, 6 MB total, 20 s. URL mode requires a consent checkbox
+- **Limits & SSRF guard**: http/https only; blocks localhost, private/loopback/link-local/CGNAT,
+  unique-local, IPv4-mapped IPv6, multicast and reserved ranges, `169.254.169.254`,
+  `.internal`/`.local` and single-label hosts, and non-standard ports. Hostnames are resolved
+  (A + AAAA) on every hop and rejected if any address is private or reserved, or if DNS fails.
+  Redirects are followed manually (max 3) and re-checked at every hop. Each scan: max 30
+  requests, 2 MB per file, 6 MB total, 20 s per request. URL mode requires a consent checkbox
   ("I own this app or have permission to audit it").
+- **Daily cap**: every edge function call, and every paid upstream call (each Jev request and
+  retry, each LLM fix), is counted against a per-function daily cap (default 200, set
+  `DAILY_CALL_LIMIT` to change it). Over the cap the functions return 429; if the counter
+  cannot be read they fail closed with 503.
 
 ## Why Jev triage?
 
@@ -76,6 +82,7 @@ works: Jev falls back to the rule table and the fixer returns static templates
 | `OPENAI_BASE_URL` | Edge Function secret (optional) | Alternate OpenAI-compatible endpoint |
 | `OPENAI_MODEL` | Edge Function secret (optional) | Fixer model (default `gpt-6-luna`) |
 | `GITHUB_TOKEN` | Edge Function secret (optional) | Raises GitHub API rate limits for repo mode |
+| `DAILY_CALL_LIMIT` | Edge Function secret (optional) | Per-function daily call cap (default 200) |
 
 ## Demo fixtures (offline)
 

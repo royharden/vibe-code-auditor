@@ -1,15 +1,29 @@
-import type { FetchedFile, FetchResult } from "./fetch-target.ts";
+import { MAX_TOTAL_TEXT_CHARS, type FetchedFile, type FetchResult } from "./fetch-target.ts";
 
 const MAX_FILES = 60;
 const MAX_FILE_BYTES = 1.5 * 1024 * 1024;
 
+const NAME_RE = /^[A-Za-z0-9_.-]{1,100}$/;
+
+function validName(name: string): boolean {
+  return NAME_RE.test(name) && name !== "." && name !== "..";
+}
+
 function parseRepo(input: string): { owner: string; repo: string } | null {
   const cleaned = input.trim().replace(/\/+$/, "");
+  let parsed: { owner: string; repo: string } | null = null;
   const m = /(?:github\.com[/:])([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(cleaned);
-  if (m) return { owner: m[1], repo: m[2] };
-  const short = /^([\w.-]+)\/([\w.-]+)$/.exec(cleaned);
-  if (short) return { owner: short[1], repo: short[2] };
-  return null;
+  if (m) parsed = { owner: m[1], repo: m[2] };
+  const short = m ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(cleaned);
+  if (short) parsed = { owner: short[1], repo: short[2] };
+  if (!parsed || !validName(parsed.owner) || !validName(parsed.repo)) return null;
+  return parsed;
+}
+
+function githubJson(res: Response) {
+  return res.json().catch(() => {
+    throw new Error("GitHub API returned an invalid response");
+  });
 }
 
 const KIND_MAP: Array<[RegExp, string]> = [
@@ -46,13 +60,13 @@ export async function fetchRepo(input: string, githubToken?: string): Promise<Fe
   if (repoRes.status === 404) throw new Error("Repository not found (it may be private — only public repos can be audited)");
   if (repoRes.status === 403) throw new Error("GitHub rate limit hit. Add a GITHUB_TOKEN secret to raise the limit.");
   if (!repoRes.ok) throw new Error(`GitHub API error ${repoRes.status}`);
-  const repoMeta = await repoRes.json();
+  const repoMeta = await githubJson(repoRes);
   if (repoMeta.private) throw new Error("Repository is private — only public repos can be audited");
   const branch = repoMeta.default_branch || "main";
 
   const treeRes = await fetch(`${api}/repos/${parsed.owner}/${parsed.repo}/git/trees/${branch}?recursive=1`, { headers: authHeaders });
   if (!treeRes.ok) throw new Error(`GitHub tree API error ${treeRes.status}`);
-  const tree = await treeRes.json();
+  const tree = await githubJson(treeRes);
 
   const candidates = (tree.tree || [])
     .filter((e: { type: string; size?: number; path: string }) => e.type === "blob")
@@ -69,6 +83,7 @@ export async function fetchRepo(input: string, githubToken?: string): Promise<Fe
     .slice(0, MAX_FILES);
 
   const files: FetchedFile[] = [];
+  let totalText = 0;
   for (const entry of candidates) {
     const raw = `https://raw.githubusercontent.com/${parsed.owner}/${parsed.repo}/${branch}/${entry.path}`;
     let text: string | undefined;
@@ -81,13 +96,22 @@ export async function fetchRepo(input: string, githubToken?: string): Promise<Fe
     } catch {
       status = 0;
     }
+    text = text?.slice(0, MAX_FILE_BYTES);
+    // Same 6 MB total-text budget as URL mode (and the audit function's input limit).
+    let error: string | undefined;
+    if (text && totalText + text.length > MAX_TOTAL_TEXT_CHARS) {
+      text = undefined;
+      error = "Size limit exceeded";
+    }
+    totalText += text?.length ?? 0;
     files.push({
       path: entry.path,
       kind: kindFor(entry.path) || "source",
       status,
       size,
       headers: {},
-      text: text?.slice(0, MAX_FILE_BYTES),
+      text,
+      ...(error ? { error } : {}),
     });
   }
 
