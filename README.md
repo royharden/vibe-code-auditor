@@ -89,8 +89,8 @@ works: Jev falls back to the rule table and the fixer returns static templates
 Three fixtures run entirely offline — "Load demo" runs the real audit, triage, and
 scoring code on bundled files:
 
-- **Leaky Todo** — a deployed app with an obviously fake `sk-proj-DEMO…` key in the
-  bundle, a `service_role` JWT, no CSP, and exposed source maps.
+- **Leaky Todo** — a deployed app with a constructed synthetic scanner probe in the
+  bundle, an unsigned synthetic service_role JWT with an invalid signature, no CSP, and exposed source maps.
 - **Supabase Starter repo** — migrations missing RLS, a committed `.env`.
 - **Well-configured site** — hardened headers, clean a11y/SEO; grade A.
 
@@ -125,3 +125,7 @@ With **Offline replay** on, recorded Jev responses are used instead of live call
   through permissive anon policies on `scans`/`findings` (RLS enabled, no user data).
 - **Cost transparency.** The report shows Jev's measured cost per scan next to an
   estimated LLM-triage cost, with editable constants.
+
+Fixture credential probes are deliberately invalid and constructed locally for offline scanning. They are never used for authentication. The synthetic JWT has alg: none, a reserved .invalid issuer, and an invalid signature.
+
+Run the isolated offline fixture regressions with Node 24+: npm run test:fixtures. They verify that invalid probes still reach the real OpenAI and service-role detectors without a network call.
