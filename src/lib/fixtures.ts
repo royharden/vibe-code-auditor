@@ -17,10 +17,16 @@ export interface Fixture {
   files: FixtureFile[];
 }
 
-const fakeServiceJwtPayload = btoa(JSON.stringify({ role: "service_role", iss: "https://demo.supabase.co" }))
-  .replace(/\+/g, "-")
-  .replace(/\//g, "_")
-  .replace(/=+$/, "");
+// Deliberately invalid, wholly synthetic scanner probes. Never use for auth.
+// Assemble the recognisable prefix so no complete key-shaped literal is stored.
+const syntheticOpenAiProbe = ["sk", "proj", "SYNTHETIC", "NOT", "A", "CREDENTIAL", "0".repeat(24)].join("-");
+const encodeProbePart = (value: object) => btoa(JSON.stringify(value))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const syntheticServiceJwt = [
+  encodeProbePart({ alg: "none", typ: "JWT", synthetic: true }),
+  encodeProbePart({ role: "service_role", iss: "https://demo.invalid", synthetic: true }),
+  "INVALID_SYNTHETIC_SIGNATURE",
+].join(".");
 
 const leakyTodoHtml = `<!DOCTYPE html>
 <html>
@@ -37,8 +43,8 @@ const leakyTodoHtml = `<!DOCTYPE html>
 </html>`;
 
 const leakyTodoJs = `// Leaky Todo bundle (fixture)
-const OPENAI_KEY = "sk-proj-DEMO1234567890abcdefghijklmnopXYZ";
-const serviceKey = "${fakeServiceJwtPayload}.fixture-signature";
+const OPENAI_KEY = "${syntheticOpenAiProbe}";
+const serviceKey = "${syntheticServiceJwt}";
 fetch("https://api.openai.com/v1/models", { headers: { Authorization: "Bearer " + OPENAI_KEY } });
 //# sourceMappingURL=index-9f8a2b.js.map`;
 
@@ -58,8 +64,8 @@ create policy "anyone can delete posts" on posts for delete
 `;
 
 const supabaseStarterEnv = `SUPABASE_URL=https://demo.supabase.co
-OPENAI_API_KEY=sk-proj-DEMOzyxwvutsrqponmlkjihgfedcba98765
-STRIPE_WEBHOOK_SECRET=whsec_DEMOqwertyuiopasdfghjklzxcvbnm
+OPENAI_API_KEY=${syntheticOpenAiProbe}
+STRIPE_WEBHOOK_SECRET=SYNTHETIC_NOT_A_CREDENTIAL
 `;
 
 const wellConfiguredHtml = `<!DOCTYPE html>
@@ -89,7 +95,7 @@ export const FIXTURES: Fixture[] = [
   {
     id: "leaky-todo",
     name: "Leaky Todo",
-    description: "A deployed app with a demo OpenAI key in the bundle, a service_role JWT, no CSP, and exposed source maps.",
+    description: "A deployed app with an invalid synthetic OpenAI probe in the bundle, an unsigned synthetic service_role JWT, no CSP, and exposed source maps.",
     mode: "url",
     target: "https://leaky-todo.demo.invalid/",
     files: [
